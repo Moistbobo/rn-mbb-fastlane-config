@@ -1,0 +1,164 @@
+artifactDir = ENV["ARTIFACT_OUTPUT_DIR"]
+testFairyAPIKey = ENV["TESTFAIRY_API_KEY"]
+firebaseAndroidAppId = ENV["FIREBASE_ANDROID_APP_ID"]
+firebaseCliToken = ENV["FIREBASE_CLI_TOKEN"]
+serviceCredentials = ENV["FIREBASE_APP_SERVICE_CREDENTIALS_JSON"]
+xcodeProjPath = ENV["XCODE_PROJ_PATH"]
+
+private_lane :bumpAndroidVersionAndCode do |values|
+    type = values[:type]
+    flavor = values[:flavor]
+
+    # only increment version name if type is provided
+    if(type)
+        increment_version_name(
+            app_project_dir: 'android/app',
+            flavor: flavor,
+            bump_type: type
+        )
+    end
+
+    # version code will always get bumped
+    increment_version_code(
+        app_project_dir: 'android/app',
+        flavor: flavor
+    )
+end
+
+private_lane :bumpIosVersionAndCode do |values|
+    target = values[:target]
+    type = values[:type]
+
+    if(type)
+        increment_version_number_in_xcodeproj(
+            xcodeproj: xcodeProjPath,
+            bump_type: type,
+            target: target
+        )
+    end
+
+    increment_build_number_in_xcodeproj(
+        target: target,
+        xcodeproj: xcodeProjPath
+    )
+end
+
+# bump version for android and ios but doesn't commit
+lane :bumpVersion do |values|
+    type = values[:type] # major, minor, patch
+    flavor = values[:flavor]
+    target = values[:target]
+
+    bumpAndroidVersionAndCode(type:type, flavor: flavor)
+
+    bumpIosVersionAndCode(type:type, target: target)
+end
+
+platform :android do
+
+    lane :build do |values|
+       task = values[:task] #bundle, assemble
+       buildType = values[:buildType] # debug, release
+       flavor = values[:flavor]
+       copy = values[:copy] # copy artifacts to ./artifacts folder
+       toPlayStore = values[:toPlayStore]
+       toFirebase = values[:toFirebase]
+       versionBump = values[:versionBump] # major, minor, patch
+
+       gradle(
+           project_dir: "android/",
+           task: "clean"
+       )
+
+       gradle(
+           project_dir: "android/",
+           task: task,
+           build_type: buildType,
+           flavor: flavor
+       )
+
+        artifacts = []
+
+        apkPaths = []
+        aabPaths = []
+
+        apkPaths << lane_context[SharedValues::GRADLE_APK_OUTPUT_PATH] if lane_context[SharedValues::GRADLE_APK_OUTPUT_PATH]
+        aabPaths << lane_context[SharedValues::GRADLE_AAB_OUTPUT_PATH] if lane_context[SharedValues::GRADLE_AAB_OUTPUT_PATH]
+
+        artifacts += apkPaths
+        artifacts += aabPaths
+
+        UI.message("artifacts to be copied")
+        UI.message(artifacts);
+
+        if (copy)
+            copy_artifacts(
+                artifacts: artifacts,
+                target_path: artifactDir,
+                fail_on_missing: false
+            )
+        end
+
+        if(toPlayStore)
+            supply(
+                aab_paths: lane_context[SharedValues::GRADLE_AAB_OUTPUT_PATH],
+                skip_upload_metadata: true,
+                skip_upload_changelogs: true,
+                skip_upload_images: true,
+                skip_upload_screenshots: true,
+                track: 'internal',
+                release_status: 'draft'
+            )
+        end
+
+        if(toFirebase)
+            firebase_app_distribution(
+                app: firebaseAndroidAppId,
+                firebase_cli_token: firebaseCliToken,
+                #service_credentials_file: serviceCredentials,
+                #android_artifact_path: "/Users/kevinpangappit/Projects/rn-playground/android/app/build/outputs/apk/production/release/app-production-release.apk"
+            )
+        end
+
+        if(versionBump)
+        # todo: how to better differentiate between versions
+            bumpAndCommit(
+                type: versionBump,
+                flavor: flavor
+            )
+        end
+    end
+end
+
+platform :ios do
+     workspace = ENV["IOS_WORKSPACE"]
+     appStoreUsername = ENV["APP_STORE_USERNAME"]
+     connectTeamId = ENV["CONNECT_TEAM_ID"]
+
+    lane :build do |values|
+        toTestFlight = values[:toTestFlight]
+        toFirebase = values[:toFirebase]
+        scheme = values[:scheme]
+
+        gym(
+           output_directory: artifactDir,
+           workspace: workspace,
+           scheme: scheme,
+           output_name: scheme, # name the ipa #{scheme}.ipa for simplicity
+           silent: true,
+           clean: true,
+           export_options:{
+               method: "app-store",
+               stripSwiftSymbols: true
+           }
+        )
+
+        if(toTestFlight)
+            pilot(
+                ipa: artifactDir + scheme + ".ipa",
+                username: appStoreUsername,
+                team_id: connectTeamId
+            )
+        end
+    end
+end
